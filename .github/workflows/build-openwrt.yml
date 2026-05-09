@@ -60,8 +60,8 @@ jobs:
       run: |
         if [ ${{ github.event.inputs.target }} = 'mt7981' ]; then
           SOURCE_TYPE="immortalwrt"
-          REPO_URL="https://github.com/padavanonly/immortalwrt-mt798x-6.6.git"
-          REPO_BRANCH="openwrt-24.10-6.6"
+          REPO_URL="https://github.com/chasey-dev/immortalwrt-mt798x-rebase.git"
+          REPO_BRANCH="25.12"
           TARGET_NAME="mt7981"
           RELEASE_PREFIX="${SOURCE_TYPE}-24.10"
         elif [ ${{ github.event.inputs.target }} = 'x86_64' ]; then
