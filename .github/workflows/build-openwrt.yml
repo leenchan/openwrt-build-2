@@ -1,0 +1,380 @@
+name: Build OpenWrt
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'target device'
+        type: choice
+        options:
+          - mt7981
+          - x86_64
+        required: true
+        default: 'mt7981'
+      upload_release:
+        description: 'upload release'
+        type: boolean
+        required: true
+        default: true
+      upload_packages:
+        description: 'upload packages'
+        type: boolean
+        required: true
+        default: true
+      make_menuconfig:
+        description: 'make menuconfig'
+        type: boolean
+        required: false
+        default: false
+      user_debug:
+        description: 'user debug'
+        type: boolean
+        required: false
+        default: false
+      
+env:
+  OPENWRT_ROOT_DIR: /mnt/openwrt
+  CCACHE_DIR: /mnt/openwrt/.ccache
+  TZ: Asia/Shanghai
+  TARGET_NAME: ''
+  HASH_TOOLS: ''
+  HASH_TOOLCHAIN: ''
+  HASH_TARGET: ''
+  BUILD_DATE: ''
+  SOURCE_TYPE: ''
+  UPLOAD_PACKAGES: true
+  UPLOAD_RELEASE: true
+  MAKE_MENUCONFIG: false
+  USER_DEBUG: false
+  
+
+jobs:
+  build:
+    name: Build ${{ github.event.inputs.target }}
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Set target device
+      run: |
+        if [ ${{ github.event.inputs.target }} = 'mt7981' ]; then
+          SOURCE_TYPE="immortalwrt"
+          REPO_URL="https://github.com/padavanonly/immortalwrt-mt798x-6.6.git"
+          REPO_BRANCH="openwrt-24.10-6.6"
+          TARGET_NAME="mt7981"
+          RELEASE_PREFIX="${SOURCE_TYPE}-24.10"
+        elif [ ${{ github.event.inputs.target }} = 'x86_64' ]; then
+          SOURCE_TYPE="openwrt"
+          REPO_URL="https://github.com/openwrt/openwrt.git"
+          REPO_BRANCH="main"
+          TARGET_NAME="x86_64"
+          RELEASE_PREFIX="${SOURCE_TYPE}-snapshot"
+        fi
+        [ -z "$TARGET_NAME" ] && {
+          echo "Error: TARGET_NAME is not set"
+          exit 1
+        }
+        echo "SOURCE_TYPE=$SOURCE_TYPE" >> $GITHUB_ENV
+        echo "REPO_URL=$REPO_URL" >> $GITHUB_ENV
+        echo "REPO_BRANCH=$REPO_BRANCH" >> $GITHUB_ENV
+        echo "TARGET_NAME=$TARGET_NAME" >> $GITHUB_ENV
+        echo "RELEASE_PREFIX=$RELEASE_PREFIX" >> $GITHUB_ENV
+        echo "UPLOAD_RELEASE=$([ "${{ github.event.inputs.upload_release }}" = "true" ] && echo "true" || echo "false")" >> $GITHUB_ENV
+        echo "UPLOAD_PACKAGES=$([ "${{ github.event.inputs.upload_packages }}" = "true" ] && echo "true" || echo "false")" >> $GITHUB_ENV
+        echo "MAKE_MENUCONFIG=$([ "${{ github.event.inputs.make_menuconfig }}" = "true" ] && echo "true" || echo "false")" >> $GITHUB_ENV
+        echo "USER_DEBUG=$([ "${{ github.event.inputs.user_debug }}" = "true" ] && echo "true" || echo "false")" >> $GITHUB_ENV
+      continue-on-error: false
+
+    - name: Checkout
+      uses: actions/checkout@main
+
+    - name: Initialization environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        df -h
+        sudo apt-get -qq update && sudo apt-get -qq upgrade
+        sudo apt-get -qq install build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget libfuse-dev
+        sudo apt-get -qq autoremove --purge
+        sudo apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+        sudo mkdir -p /workdir
+        sudo chown $USER:$GROUPS /workdir
+
+    - name: Clone source code
+      working-directory: /workdir
+      run: |
+        sudo mkdir $OPENWRT_ROOT_DIR
+        sudo chown $USER:$GROUPS $OPENWRT_ROOT_DIR
+        git clone $REPO_URL -b $REPO_BRANCH $OPENWRT_ROOT_DIR
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+        cd $OPENWRT_ROOT_DIR
+        echo "REPO_COMMIT_HASH=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+    - name: Load custom feeds
+      env:
+        GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      run: |
+        cd $OPENWRT_ROOT_DIR
+        [ -f $GITHUB_WORKSPACE/$TARGET_NAME/feeds.conf.default ] && mv $GITHUB_WORKSPACE/$TARGET_NAME/feeds.conf.default ${{ env.OPENWRT_ROOT_DIR }}/feeds.conf.default
+        [ -f $GITHUB_WORKSPACE/run-before-update-feeds.sh ] && {
+          chmod +x $GITHUB_WORKSPACE/run-before-update-feeds.sh
+          $GITHUB_WORKSPACE/run-before-update-feeds.sh
+        }
+
+    - name: Update feeds
+      run: |
+        cd $OPENWRT_ROOT_DIR
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+        [ -f $GITHUB_WORKSPACE/run-after-update-feeds.sh ] && {
+          chmod +x $GITHUB_WORKSPACE/run-after-update-feeds.sh
+          $GITHUB_WORKSPACE/run-after-update-feeds.sh
+        }
+
+    - name: Generate hash
+      id: hash
+      run: |
+        cd $OPENWRT_ROOT_DIR
+        echo "BUILD_DATE=$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+        echo HASH_TOOLS=$(tar --sort=name --mtime='2000-01-01 00:00:00 UTC' -C ./tools -cf - . | sha256sum | awk '{print $1}') >> $GITHUB_ENV
+        echo HASH_TOOLCHAIN=$(tar --sort=name --mtime='2000-01-01 00:00:00 UTC' -C ./toolchain -cf - . | sha256sum | awk '{print $1}') >> $GITHUB_ENV
+        echo HASH_TARGET=$(tar --sort=name --mtime='2000-01-01 00:00:00 UTC' -C ./target -cf - . | sha256sum | awk '{print $1}') >> $GITHUB_ENV
+
+    - name: Cache > restore staging_dir
+      id: cache-restore-staging-dir
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          ${{ env.OPENWRT_ROOT_DIR }}/staging_dir
+        key: ${{ env.SOURCE_TYPE }}-${{ env.TARGET_NAME }}-staging-dir-${{ env.HASH_TOOLS }}-${{ env.HASH_TOOLCHAIN }}
+
+    - name: Cache > restore ccache
+      id: cache-restore-ccache
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          ${{ env.CCACHE_DIR }}
+        key: ${{ env.SOURCE_TYPE }}-${{ env.TARGET_NAME }}-ccache
+
+    - name: Cache > restore dl
+      id: cache-restore-dl
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          ${{ env.OPENWRT_ROOT_DIR }}/dl/*.*
+        key: ${{ env.SOURCE_TYPE }}-${{ env.TARGET_NAME }}-dl
+
+    - name: Prepare for compiling
+      run: |
+        [ -f $GITHUB_WORKSPACE/$TARGET_NAME/.config ] && cp -rf $GITHUB_WORKSPACE/$TARGET_NAME/.config $OPENWRT_ROOT_DIR/.config
+        [ -d $GITHUB_WORKSPACE/files ] && cp -rf $GITHUB_WORKSPACE/files $OPENWRT_ROOT_DIR/files
+        [ -d $GITHUB_WORKSPACE/$TARGET_NAME/files ] && cp -rf $GITHUB_WORKSPACE/$TARGET_NAME/files $OPENWRT_ROOT_DIR/files
+        cd $OPENWRT_ROOT_DIR
+        [ -f .config ] || {
+          echo "Error: .config file not found"
+          exit 1
+        }
+        [ -f $GITHUB_WORKSPACE/run-before-build.sh ] && {
+          chmod +x $GITHUB_WORKSPACE/run-before-build.sh
+          $GITHUB_WORKSPACE/run-before-build.sh
+        }
+        [ -d "staging_dir" ] && find staging_dir -type f -regex '.*/stamp/.*' -exec touch {} \;
+        [ -d "staging_dir" ] && find staging_dir -type f -regex '.*/.built' -exec touch {} \;
+        [ -d "build_dir" ] && find build_dir -type f -regex '.*/stamp/.*' -exec touch {} \;
+        [ -d "build_dir" ] && find build_dir -type f -regex '.*/.built' -exec touch {} \;
+        sed -Ei '/(CONFIG_CCACHE|CONFIG_DEVEL)/d' .config
+        echo "" >> .config
+        echo "CONFIG_DEVEL=y" >> .config
+        echo "CONFIG_CCACHE=y" >> .config        
+        echo "CONFIG_CCACHE_DIR=\"\$(TOPDIR)/.ccache\"" >> .config
+        [ -z "$GO_ROOT_DIR" ] || {
+          if grep -Eq '^CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT' .config; then
+            sed -Ei "s|(CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=).*|\1\"$GO_ROOT_DIR\"|g" .config
+          else
+            echo "CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=\"$GO_ROOT_DIR\"" >> .config
+          fi
+        }
+        make defconfig
+      continue-on-error: false
+    
+    - name: User > make menuconfig
+      id: user-make-menuconfig
+      if: ${{ env.MAKE_MENUCONFIG == 'true' }}
+      env:
+        NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+      run: |
+        cd $OPENWRT_ROOT_DIR
+        sh $GITHUB_WORKSPACE/run-ttyd.sh "make menuconfig" 3600
+        [ -f .config ] && {
+          cp .config /tmp/menuconfig.config && echo "upload_menuconfig=/tmp/menuconfig.config" >> $GITHUB_OUTPUT
+        }
+
+    - name: User > upload .config
+      uses: actions/upload-artifact@main
+      if: steps.user-make-menuconfig.outputs.upload_menuconfig != ''
+      with:
+        name: menuconfig-config-${{ env.BUILD_DATE }}
+        path: |
+          ${{ steps.user-make-menuconfig.outputs.upload_menuconfig }}
+
+    - name: Download > package
+      id: download-package
+      env:
+        GH_REPO: ${{ github.repository }}
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        cd $OPENWRT_ROOT_DIR
+        HASH_DL_CACHE=$(find dl/**.* -exec sha256sum {} ';' | sha256sum | awk '{print $1}')
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+        find dl -type f -atime +30 -delete
+        HASH_DL=$(find dl/**.* -exec sha256sum {} ';' | sha256sum | awk '{print $1}')
+        [ "$HASH_DL" = "$HASH_DL_CACHE" ] || {
+          gh cache list --json 'id,key,sizeInBytes,createdAt' | jq -r '.[] | select(.key | contains("${{ env.SOURCE_TYPE }}-${{ env.TARGET_NAME }}-dl"))'
+          CACHE_DL_ID=$(gh cache list --json id --key ${{ env.SOURCE_TYPE }}-${{ env.TARGET_NAME }}-dl | jq '.[0].id')
+          echo "CACHE_DL_ID: $CACHE_DL_ID"
+          if echo "$CACHE_DL_ID" | grep -Eq '^[0-9]+$'; then  
+            gh cache delete $CACHE_DL_ID || true
+          fi
+          echo "toSaveDl=true" >> $GITHUB_OUTPUT
+        }
+
+    - name: Cache > save dl
+      if: steps.download-package.outputs.toSaveDl == 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          ${{ env.OPENWRT_ROOT_DIR }}/dl/*.*
+        key: ${{ env.SOURCE_TYPE }}-${{ env.TARGET_NAME }}-dl
+
+    - name: Compile toolchain
+      id: compile-toolchain
+      if: steps.cache-restore-staging-dir.outputs.cache-hit != 'true'
+      run: |
+        cd $OPENWRT_ROOT_DIR
+        make tools/install
+        make toolchain/install
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Compile the firmware
+      id: compile
+      run: |
+        STATUS=success
+        cd $OPENWRT_ROOT_DIR
+        set -o pipefail
+        make -j$(nproc) 2>&1 | tee compile-log.txt || make -j1 V=s 2>&1 | tee compile-log.txt || STATUS=fail
+        [ "$STATUS" = "success" ] && cp .config ./bin/config
+        echo "STATUS: $STATUS"
+        echo "status=$STATUS" >> $GITHUB_OUTPUT
+      continue-on-error: true
+
+    - name: Upload compile log
+      uses: actions/upload-artifact@main
+      if: steps.compile.outputs.status == 'fail'
+      with:
+        name: compile-log-${{ env.TARGET_NAME }}-${{ env.BUILD_DATE }}
+        path: |
+          ${{ env.OPENWRT_ROOT_DIR }}/compile-log.txt
+
+    - name: Cache > remove toolchain
+      id: cache-remove-toolchain
+      if: steps.compile.outputs.status == 'success'
+      env:
+        GH_REPO: ${{ github.repository }}
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        cd $OPENWRT_ROOT_DIR
+        gh cache list --json 'id,key,sizeInBytes,createdAt' | jq -r '.[] | select(.key | contains("${SOURCE_TYPE}-${TARGET_NAME}-staging-dir"))'
+        CACHE_STAGING_DIR_ID=$(gh cache list --json 'id' --key ${SOURCE_TYPE}-${TARGET_NAME}-staging-dir | jq '.[0].id')
+        echo "CACHE_STAGING_DIR_ID: $CACHE_STAGING_DIR_ID"
+        echo "$CACHE_STAGING_DIR_ID" | grep -Eq '^[0-9]+$' && gh cache delete $CACHE_STAGING_DIR_ID || true
+
+    - name: Cache > save toolchain
+      if: steps.compile.outputs.status == 'success'
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          ${{ env.OPENWRT_ROOT_DIR }}/staging_dir
+        key: ${{ env.SOURCE_TYPE }}-${{ env.TARGET_NAME }}-staging-dir-${{ env.HASH_TOOLS }}-${{ env.HASH_TOOLCHAIN }}
+
+    - name: Cache > remove ccache
+      id: cache-remove-ccache
+      if: steps.compile.outputs.status == 'success'
+      env:
+        GH_REPO: ${{ github.repository }}
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        cd $OPENWRT_ROOT_DIR
+        gh cache list --json 'id,key,sizeInBytes,createdAt' | jq -r '.[] | select(.key | contains("${SOURCE_TYPE}-${TARGET_NAME}-ccache"))'
+        CACHE_CCACHE_ID=$(gh cache list --json 'id' --key ${SOURCE_TYPE}-${TARGET_NAME}-ccache | jq '.[0].id')
+        echo "CACHE_CCACHE_ID: $CACHE_CCACHE_ID"
+        echo "$CACHE_CCACHE_ID" | grep -Eq '^[0-9]+$' && gh cache delete $CACHE_CCACHE_ID || true        
+
+    - name: Cache > save ccache
+      if: steps.compile.outputs.status == 'success'
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          ${{ env.CCACHE_DIR }}
+        key: ${{ env.SOURCE_TYPE }}-${{ env.TARGET_NAME }}-ccache
+
+    - name: Upload packages
+      uses: actions/upload-artifact@main
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_PACKAGES == 'true'
+      with:
+        name: packages-${{ env.TARGET_NAME }}-${{ env.BUILD_DATE }}
+        path: |
+          ${{ env.OPENWRT_ROOT_DIR }}/bin/packages/*
+          ${{ env.OPENWRT_ROOT_DIR }}/bin/targets/*/*/packages/*
+
+    - name: Generate release tag
+      id: create-release-tag
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
+      run: |
+        echo "release_tag=${RELEASE_PREFIX}-${REPO_COMMIT_HASH}-${TARGET_NAME}-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        touch release.txt
+        echo "Source: $REPO_URL" >> release.txt
+        echo "Branch: $REPO_BRANCH" >> release.txt
+        echo "Target: $TARGET_NAME" >> release.txt
+        [ -f "$GITHUB_WORKSPACE/$TARGET_NAME/release.txt" ] && cat "$GITHUB_WORKSPACE/$TARGET_NAME/release.txt" >> release.txt
+        ls ${{ env.OPENWRT_ROOT_DIR }}/bin/targets/*/*/
+
+    - name: Upload firmware to release
+      id: upload-firmware-to-release
+      uses: softprops/action-gh-release@v2
+      if: steps.create-release-tag.outcome == 'success' && !cancelled()
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.create-release-tag.outputs.release_tag }}
+        body_path: release.txt
+        files: |
+          ${{ env.OPENWRT_ROOT_DIR }}/bin/targets/*/*/*sysupgrade*.bin
+          ${{ env.OPENWRT_ROOT_DIR }}/bin/targets/*/*/*sysupgrade*.itb
+          ${{ env.OPENWRT_ROOT_DIR }}/bin/targets/*/*/*rootfs*.img.gz
+          ${{ env.OPENWRT_ROOT_DIR }}/bin/targets/*/*/*combined*.img.gz
+          ${{ env.OPENWRT_ROOT_DIR }}/bin/targets/*/*/*x86*.tar.gz
+          ${{ env.OPENWRT_ROOT_DIR }}/bin/targets/*/*/*x86*.kernel.bin
+          ${{ env.OPENWRT_ROOT_DIR }}/bin/config
+
+    - name: User > debug
+      id: user-debug
+      if: env.USER_DEBUG == 'true'
+      env:
+        NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+      run: |
+        cd $OPENWRT_ROOT_DIR
+        sh $GITHUB_WORKSPACE/run-ttyd.sh "bash" 3600 || true
+
+    - name: Delete workflow runs
+      uses: GitRML/delete-workflow-runs@main
+      with:
+        retain_days: 1
+        keep_minimum_runs: 3
+
+    - name: Complete
+      run: |
+        [ "${{ steps.compile.outputs.status }}" = "success" ] || false
