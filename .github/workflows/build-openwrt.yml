@@ -169,8 +169,9 @@ jobs:
     - name: Prepare for compiling
       run: |
         [ -f $GITHUB_WORKSPACE/$TARGET_NAME/.config ] && cp -rf $GITHUB_WORKSPACE/$TARGET_NAME/.config $OPENWRT_ROOT_DIR/.config
-        [ -d $GITHUB_WORKSPACE/files ] && cp -rf $GITHUB_WORKSPACE/files $OPENWRT_ROOT_DIR/files
-        [ -d $GITHUB_WORKSPACE/$TARGET_NAME/files ] && cp -rf $GITHUB_WORKSPACE/$TARGET_NAME/files $OPENWRT_ROOT_DIR/files
+        [ -d $GITHUB_WORKSPACE/files ] && cp -rf $GITHUB_WORKSPACE/files/* $OPENWRT_ROOT_DIR/files/
+        [ -d $GITHUB_WORKSPACE/$TARGET_NAME/files ] && cp -rf $GITHUB_WORKSPACE/$TARGET_NAME/files/* $OPENWRT_ROOT_DIR/files/
+        [ -d $GITHUB_WORKSPACE/$TARGET_NAME/repo ] && cp -rf $GITHUB_WORKSPACE/$TARGET_NAME/repo/* $OPENWRT_ROOT_DIR/
         cd $OPENWRT_ROOT_DIR
         [ -f .config ] || {
           echo "Error: .config file not found"
