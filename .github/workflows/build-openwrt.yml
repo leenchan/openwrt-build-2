@@ -191,6 +191,7 @@ jobs:
         echo "CONFIG_CCACHE=y" >> .config        
         echo "CONFIG_CCACHE_DIR=\"\$(TOPDIR)/.ccache\"" >> .config
         [ -z "$GO_ROOT_DIR" ] || {
+          echo "GO_ROOT_DIR: $GO_ROOT_DIR"
           if grep -Eq '^CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT' .config; then
             sed -Ei "s|(CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=).*|\1\"$GO_ROOT_DIR\"|g" .config
           else
@@ -279,7 +280,6 @@ jobs:
         name: compile-log-${{ env.TARGET_NAME }}-${{ env.BUILD_DATE }}
         path: |
           ${{ env.OPENWRT_ROOT_DIR }}/compile-log.txt
-          ${{ env.OPENWRT_ROOT_DIR }}/.config
 
     - name: Cache > remove toolchain
       id: cache-remove-toolchain
